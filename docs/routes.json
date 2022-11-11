@@ -168,6 +168,10 @@
         "title": "API v1 Endpoints",
         "hidden": true,
         "path": "/api-reference/rest-api-endpoints-v1"
+      },
+      {
+        "title": "API change log",
+        "path": "/api-reference/api-changelog"
       }
     ]
   },
