@@ -1,0 +1,21 @@
+---
+meta:
+  title: "API changelog"
+  parentTitle: "API Reference"
+  description: "Keep track of every change to the Liveblocks API"
+---
+
+This changelog lists all additions and updates to the Liveblocks API, in
+chronological order.
+
+## November 7, 2022
+
+We can now delete a room and its storage by calling our new REST API:
+
+<EndpointBlock
+  method="DELETE"
+  endpoint="https://api.liveblocks.io/v2/rooms/{roomId}"
+/>
+
+This comes in addition to our existing set of endpoints that allow you to manage
+rooms (listing, creation, metadata).
