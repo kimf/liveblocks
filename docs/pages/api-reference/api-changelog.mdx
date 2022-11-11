@@ -8,7 +8,7 @@ meta:
 This changelog lists all additions and updates to the Liveblocks API, in
 chronological order.
 
-## November 7, 2022
+### November 7th, 2022
 
 We can now delete a room and its storage by calling our new REST API:
 
@@ -19,3 +19,24 @@ We can now delete a room and its storage by calling our new REST API:
 
 This comes in addition to our existing set of endpoints that allow you to manage
 rooms (listing, creation, metadata).
+
+### September 22nd, 2022
+
+New version of our REST API: `https://api.liveblocks.io/v2` with new
+authentication method.
+
+We can now create a new room:
+
+<EndpointBlock method="POST" endpoint="https://api.liveblocks.io/v2/rooms" />
+
+Update a room:
+
+<EndpointBlock
+  method="POST"
+  endpoint="https://api.liveblocks.io/v2/rooms/{roomId}"
+/>
+
+The list rooms has been improved with filtering capabilities on metadata, userId
+and groupId:
+
+<EndpointBlock method="GET" endpoint="https://api.liveblocks.io/v2/rooms" />

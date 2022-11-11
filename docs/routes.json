@@ -168,10 +168,6 @@
         "title": "API v1 Endpoints",
         "hidden": true,
         "path": "/api-reference/rest-api-endpoints-v1"
-      },
-      {
-        "title": "API change log",
-        "path": "/api-reference/api-changelog"
       }
     ]
   },
@@ -185,6 +181,10 @@
       {
         "title": "Release notes",
         "href": "https://github.com/liveblocks/liveblocks/releases"
+      },
+      {
+        "title": "API Changelog",
+        "path": "/api-reference/api-changelog"
       }
     ]
   }
