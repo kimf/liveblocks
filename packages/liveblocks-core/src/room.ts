@@ -17,6 +17,7 @@ import { makeEventSource } from "./lib/EventSource";
 import * as console from "./lib/fancy-console";
 import type { Json, JsonObject } from "./lib/Json";
 import { isJsonArray, isJsonObject } from "./lib/Json";
+import { asPos } from "./lib/position";
 import type { Resolve } from "./lib/Resolve";
 import { compact, isPlainObject, tryParseJson } from "./lib/utils";
 import type { Authentication } from "./protocol/Authentication";
@@ -1165,7 +1166,11 @@ function makeStateMachine<
         }
 
         if (node.parent.type === "HasParent" && isLiveList(node.parent.node)) {
-          return node.parent.node._setChildKey(op.parentKey, node, source);
+          return node.parent.node._setChildKey(
+            asPos(op.parentKey),
+            node,
+            source
+          );
         }
         return { modified: false };
       }

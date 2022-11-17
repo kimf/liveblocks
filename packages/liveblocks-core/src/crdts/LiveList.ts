@@ -1,5 +1,6 @@
 import { nn } from "../lib/assert";
-import { comparePosition, makePosition } from "../lib/position";
+import type { Pos } from "../lib/position";
+import { asPos, comparePosition, makePosition } from "../lib/position";
 import type { CreateChildOp, CreateListOp, CreateOp, Op } from "../protocol/Op";
 import { OpCode } from "../protocol/Op";
 import type { IdTuple, SerializedList } from "../protocol/SerializedCrdt";
@@ -50,10 +51,7 @@ export type LiveListUpdates<TItem extends Lson> = {
 };
 
 function compareNodePosition(itemA: LiveNode, itemB: LiveNode) {
-  return comparePosition(
-    itemA._getParentKeyOrThrow(),
-    itemB._getParentKeyOrThrow()
-  );
+  return comparePosition(itemA.parentPos, itemB.parentPos);
 }
 
 /**
@@ -402,7 +400,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
       throw new Error("Can't attach child if managed pool is not present");
     }
 
-    const key = op.parentKey;
+    const key = asPos(op.parentKey);
 
     const existingItemIndex = this._indexOfPosition(key);
 
@@ -423,7 +421,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   /** @internal */
   private _applyInsertAck(op: CreateChildOp): ApplyResult {
     const existingItem = this._items.find((item) => item._id === op.id);
-    const key = op.parentKey;
+    const key = asPos(op.parentKey);
 
     const itemIndexAtPosition = this._indexOfPosition(key);
 
@@ -502,8 +500,8 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
     let newKey = key;
 
     if (existingItemIndex !== -1) {
-      const before = this._items[existingItemIndex]?._getParentKeyOrThrow();
-      const after = this._items[existingItemIndex + 1]?._getParentKeyOrThrow();
+      const before = this._items[existingItemIndex]?.parentPos;
+      const after = this._items[existingItemIndex + 1]?.parentPos;
 
       newKey = makePosition(before, after);
       child._setParentLink(this, newKey);
@@ -639,10 +637,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   }
 
   /** @internal */
-  private _applySetChildKeyRemote(
-    newKey: string,
-    child: LiveNode
-  ): ApplyResult {
+  private _applySetChildKeyRemote(newKey: Pos, child: LiveNode): ApplyResult {
     if (this._implicitlyDeletedItems.has(child)) {
       this._implicitlyDeletedItems.delete(child);
 
@@ -690,10 +685,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
     } else {
       this._items[existingItemIndex]._setParentLink(
         this,
-        makePosition(
-          newKey,
-          this._items[existingItemIndex + 1]?._getParentKeyOrThrow()
-        )
+        makePosition(newKey, this._items[existingItemIndex + 1]?.parentPos)
       );
 
       const previousIndex = this._items.indexOf(child);
@@ -715,7 +707,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   }
 
   /** @internal */
-  private _applySetChildKeyAck(newKey: string, child: LiveNode): ApplyResult {
+  private _applySetChildKeyAck(newKey: Pos, child: LiveNode): ApplyResult {
     const previousKey = nn(child._parentKey);
 
     if (this._implicitlyDeletedItems.has(child)) {
@@ -726,10 +718,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
       if (existingItemIndex !== -1) {
         this._items[existingItemIndex]._setParentLink(
           this,
-          makePosition(
-            newKey,
-            this._items[existingItemIndex + 1]?._getParentKeyOrThrow()
-          )
+          makePosition(newKey, this._items[existingItemIndex + 1]?.parentPos)
         );
       }
 
@@ -757,10 +746,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
       if (existingItemIndex !== -1) {
         this._items[existingItemIndex]._setParentLink(
           this,
-          makePosition(
-            newKey,
-            this._items[existingItemIndex + 1]?._getParentKeyOrThrow()
-          )
+          makePosition(newKey, this._items[existingItemIndex + 1]?.parentPos)
         );
       }
 
@@ -786,10 +772,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   }
 
   /** @internal */
-  private _applySetChildKeyUndoRedo(
-    newKey: string,
-    child: LiveNode
-  ): ApplyResult {
+  private _applySetChildKeyUndoRedo(newKey: Pos, child: LiveNode): ApplyResult {
     const previousKey = nn(child._parentKey);
 
     const previousIndex = this._items.indexOf(child);
@@ -799,10 +782,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
     if (existingItemIndex !== -1) {
       this._items[existingItemIndex]._setParentLink(
         this,
-        makePosition(
-          newKey,
-          this._items[existingItemIndex + 1]?._getParentKeyOrThrow()
-        )
+        makePosition(newKey, this._items[existingItemIndex + 1]?.parentPos)
       );
     }
 
@@ -831,7 +811,7 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   }
 
   /** @internal */
-  _setChildKey(newKey: string, child: LiveNode, source: OpSource): ApplyResult {
+  _setChildKey(newKey: Pos, child: LiveNode, source: OpSource): ApplyResult {
     if (source === OpSource.REMOTE) {
       return this._applySetChildKeyRemote(newKey, child);
     } else if (source === OpSource.ACK) {
@@ -889,11 +869,9 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
     }
 
     const before = this._items[index - 1]
-      ? this._items[index - 1]._getParentKeyOrThrow()
+      ? this._items[index - 1].parentPos
       : undefined;
-    const after = this._items[index]
-      ? this._items[index]._getParentKeyOrThrow()
-      : undefined;
+    const after = this._items[index] ? this._items[index].parentPos : undefined;
 
     const position = makePosition(before, after);
 
@@ -948,14 +926,12 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
       afterPosition =
         targetIndex === this._items.length - 1
           ? undefined
-          : this._items[targetIndex + 1]._getParentKeyOrThrow();
-      beforePosition = this._items[targetIndex]._getParentKeyOrThrow();
+          : this._items[targetIndex + 1].parentPos;
+      beforePosition = this._items[targetIndex].parentPos;
     } else {
-      afterPosition = this._items[targetIndex]._getParentKeyOrThrow();
+      afterPosition = this._items[targetIndex].parentPos;
       beforePosition =
-        targetIndex === 0
-          ? undefined
-          : this._items[targetIndex - 1]._getParentKeyOrThrow();
+        targetIndex === 0 ? undefined : this._items[targetIndex - 1].parentPos;
     }
 
     const position = makePosition(beforePosition, afterPosition);
@@ -1255,11 +1231,11 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
   }
 
   /** @internal */
-  private _shiftItemPosition(index: number, key: string) {
+  private _shiftItemPosition(index: number, key: Pos) {
     const shiftedPosition = makePosition(
       key,
       this._items.length > index + 1
-        ? this._items[index + 1]?._getParentKeyOrThrow()
+        ? this._items[index + 1]?.parentPos
         : undefined
     );
 
