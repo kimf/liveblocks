@@ -155,8 +155,8 @@ The second argument is a configuration for the presence and storage.
   `new LiveList()`, `new LiveObject({ a: 1 })`, etc.) or be serializable to
   JSON.
 - `shouldInitiallyConnect` (optional) - Whether or not the room connects to
-  Liveblocks servers. Default is `true`. Usually set to `false` when the client is
-  used from the server to not call the authentication endpoint or connect via
+  Liveblocks servers. Default is `true`. Usually set to `false` when the client
+  is used from the server to not call the authentication endpoint or connect via
   WebSocket.
 
 ```ts
@@ -289,17 +289,21 @@ const unsubscribe = room.subscribe(
   root,
   (updates) => {
     for (const update of updates) {
-      switch (update.type) {
+      const {
+        type, // "update" or "delete"
+        node,
+      } = update;
+      switch (node.type) {
         case "LiveObject": {
-          // update.node is the LiveObject that has been updated
+          // update.node is the LiveObject that has been updated/deleted
           break;
         }
         case "LiveMap": {
-          // update.node is the LiveMap that has been updated
+          // update.node is the LiveMap that has been updated/deleted
           break;
         }
         case "LiveList": {
-          // update.node is the LiveList that has been updated
+          // update.node is the LiveList that has been updated/deleted
           break;
         }
       }
@@ -393,6 +397,29 @@ Returns an unsubscribe function.
 ```ts
 room.subscribe("history", ({ canUndo, canRedo }) => {
   // Do something
+});
+```
+
+### Room.subscribe("storage-status") [#Room.subscribe.storage-status]
+
+Subscribe to storage status changes.
+
+Returns an unsubscribe function.
+
+```typescript
+room.subscribe("storage-status", (status) => {
+  switch (status) {
+    case "not-loaded":
+      break;
+    case "loading":
+      break;
+    case "synchronizing":
+      break;
+    case "synchronized":
+      break;
+    default:
+      break;
+  }
 });
 ```
 
@@ -500,6 +527,28 @@ room.updatePresence({ cursor: { x: 2, y: 2 } }, { addToHistory: true });
 room.history.resume();
 room.history.undo();
 // room.getPresence() equals { cursor: { x: 0, y: 0 } }
+```
+
+### Room.getStorageStatus
+
+Get the storage status.
+
+- `not-loaded`: Initial state when entering the room.
+- `loading`: Once the storage has been requested via room.getStorage().
+- `synchronizing`: When some local updates have not been acknowledged by
+  Liveblocks servers.
+- `synchronized`: Storage is in sync with Liveblocks servers.
+
+```ts
+const status = room.getStorageStatus();
+```
+
+### Room.reconnect
+
+Close the room connection and try to reconnect.
+
+```ts
+room.reconnect();
 ```
 
 ## Storage

@@ -48,9 +48,11 @@ import type {
   UserLeftServerMsg,
 } from "./protocol/ServerMsg";
 import { ServerMsgCode } from "./protocol/ServerMsg";
+import type { ImmutableRef } from "./refs/ImmutableRef";
 import { MeRef } from "./refs/MeRef";
 import { OthersRef } from "./refs/OthersRef";
 import { DerivedRef, ValueRef } from "./refs/ValueRef";
+import type * as DevTools from "./types/DevToolsTreeNode";
 import type { NodeMap, ParentToChildNodeMap } from "./types/NodeMap";
 import type { Others, OthersEvent } from "./types/Others";
 import type { User } from "./types/User";
@@ -91,6 +93,16 @@ export type Connection =
 
 export type ConnectionState = Connection["state"];
 
+export type StorageStatus =
+  /* The storage is not loaded and has not been requested. */
+  | "not-loaded"
+  /* The storage is loading from Liveblocks servers */
+  | "loading"
+  /* Some storage modifications has not been acknowledged yet by the server */
+  | "synchronizing"
+  /* The storage is sync with Liveblocks servers */
+  | "synchronized";
+
 type RoomEventCallbackMap<
   TPresence extends JsonObject,
   TUserMeta extends BaseUserMeta,
@@ -109,6 +121,7 @@ type RoomEventCallbackMap<
   error: Callback<Error>;
   connection: Callback<ConnectionState>;
   history: Callback<HistoryEvent>;
+  "storage-status": Callback<StorageStatus>;
 };
 
 export interface History {
@@ -190,10 +203,10 @@ export interface History {
   resume: () => void;
 }
 
-export interface HistoryEvent {
+export type HistoryEvent = {
   canUndo: boolean;
   canRedo: boolean;
-}
+};
 
 export type RoomEventName = Extract<
   keyof RoomEventCallbackMap<never, never, never>,
@@ -354,9 +367,31 @@ export type Room<
      * room.subscribe("history", ({ canUndo, canRedo }) => {
      *   // Do something
      * });
-     *
      */
     (type: "history", listener: Callback<HistoryEvent>): () => void;
+
+    /**
+     * Subscribe to storage status changes.
+     *
+     * @returns Unsubscribe function.
+     *
+     * @example
+     * room.subscribe("storage-status", (status) => {
+     *   switch(status) {
+     *      case "not-loaded":
+     *        break;
+     *      case "loading":
+     *        break;
+     *      case "synchronizing":
+     *        break;
+     *      case "synchronized":
+     *        break;
+     *      default:
+     *        break;
+     *   }
+     * });
+     */
+    (type: "storage-status", listener: Callback<StorageStatus>): () => void;
   };
 
   /**
@@ -482,9 +517,24 @@ export type Room<
   batch<T>(fn: () => T): T;
 
   /**
+   * Get the storage status.
+   *
+   * - `not-loaded`: Initial state when entering the room.
+   * - `loading`: Once the storage has been requested via room.getStorage().
+   * - `synchronizing`: When some local updates have not been acknowledged by Liveblocks servers.
+   * - `synchronized`: Storage is in sync with Liveblocks servers.
+   */
+  getStorageStatus(): StorageStatus;
+
+  /**
+   * Close room connection and try to reconnect
+   */
+  reconnect(): void;
+
+  /**
    * @internal Utilities only used for unit testing.
    */
-  __INTERNAL_DO_NOT_USE: {
+  readonly __INTERNAL_DO_NOT_USE: {
     simulateCloseWebsocket(): void;
     simulateSendCloseEvent(event: {
       code: number;
@@ -492,6 +542,12 @@ export type Room<
       reason: string;
     }): void;
   };
+
+  /** @internal - For dev tools support */
+  getSelf_forDevTools(): DevTools.UserTreeNode | null;
+
+  /** @internal - For dev tools support */
+  getOthers_forDevTools(): readonly DevTools.UserTreeNode[];
 };
 
 export function isRoomEventName(value: string): value is RoomEventName {
@@ -501,7 +557,8 @@ export function isRoomEventName(value: string): value is RoomEventName {
     value === "event" ||
     value === "error" ||
     value === "connection" ||
-    value === "history"
+    value === "history" ||
+    value === "storage-status"
   );
 }
 
@@ -518,7 +575,7 @@ type Machine<
   heartbeat(): void;
   onNavigatorOnline(): void;
 
-  // Internal dev tools
+  // Internal unit testing tools
   simulateSocketClose(): void;
   simulateSendCloseEvent(event: {
     code: number;
@@ -534,6 +591,7 @@ type Machine<
   // Core
   connect(): void;
   disconnect(): void;
+  reconnect(): void;
 
   // Generic storage callbacks
   subscribe(callback: StorageCallback): () => void;
@@ -564,6 +622,7 @@ type Machine<
     root: LiveObject<TStorage>;
   }>;
   getStorageSnapshot(): LiveObject<TStorage> | null;
+  getStorageStatus(): StorageStatus;
 
   readonly events: {
     readonly customEvent: Observable<CustomEvent<TRoomEvent>>;
@@ -577,6 +636,7 @@ type Machine<
     readonly storage: Observable<StorageUpdate[]>;
     readonly history: Observable<HistoryEvent>;
     readonly storageDidLoad: Observable<void>;
+    readonly storageStatus: Observable<StorageStatus>;
   };
 
   // Core
@@ -587,6 +647,10 @@ type Machine<
   // Presence
   getPresence(): Readonly<TPresence>;
   getOthers(): Others<TPresence, TUserMeta>;
+
+  // Dev tools support
+  getSelf_forDevTools(): DevTools.UserTreeNode | null;
+  getOthers_forDevTools(): readonly DevTools.UserTreeNode[];
 };
 
 const BACKOFF_RETRY_DELAYS = [250, 500, 1000, 2000, 4000, 8000, 10000];
@@ -615,8 +679,8 @@ function isConnectionSelfAware(
 type HistoryOp<TPresence extends JsonObject> =
   | Op
   | {
-      type: "presence";
-      data: TPresence;
+      readonly type: "presence";
+      readonly data: TPresence;
     };
 
 type IdFactory = () => string;
@@ -653,6 +717,9 @@ type State<
   readonly me: MeRef<TPresence>;
   readonly others: OthersRef<TPresence, TUserMeta>;
 
+  /** @internal */
+  readonly others_forDevTools: ImmutableRef<DevTools.UserTreeNode[]>;
+
   idFactory: IdFactory | null;
   numberOfRetry: number;
   initialStorage?: TStorage;
@@ -685,7 +752,9 @@ type State<
     };
   };
 
-  offlineOperations: Map<string, Op>;
+  // A registry of yet-unacknowledged Ops. These Ops have already been
+  // submitted to the server, but have not yet been acknowledged.
+  unacknowledgedOps: Map<string, Op>;
 };
 
 type Effects<TPresence extends JsonObject, TRoomEvent extends Json> = {
@@ -756,6 +825,18 @@ type Config = {
    */
   WebSocketPolyfill?: Polyfills["WebSocket"];
 };
+
+function userToTreeNode(
+  key: string,
+  user: User<JsonObject, BaseUserMeta>
+): DevTools.UserTreeNode {
+  return {
+    type: "User",
+    id: `${user.connectionId}`,
+    key,
+    payload: user,
+  };
+}
 
 function makeStateMachine<
   TPresence extends JsonObject,
@@ -833,6 +914,7 @@ function makeStateMachine<
     storage: makeEventSource<StorageUpdate[]>(),
     history: makeEventSource<HistoryEvent>(),
     storageDidLoad: makeEventSource<void>(),
+    storageStatus: makeEventSource<StorageStatus>(),
   };
 
   const effects: Effects<TPresence, TRoomEvent> = mockedEffects || {
@@ -903,6 +985,12 @@ function makeStateMachine<
         : null
   );
 
+  // For use in dev tools
+  const selfAsTreeNode = new DerivedRef(
+    self as ImmutableRef<User<TPresence, TUserMeta> | null>,
+    (me) => (me !== null ? userToTreeNode("Me", me) : null)
+  );
+
   function createOrUpdateRootFromMessage(
     message: InitialDocumentStateServerMsg,
     batchedUpdatesWrapper: (cb: () => void) => void
@@ -970,7 +1058,7 @@ function makeStateMachine<
     // Get operations that represent the diff between 2 states.
     const ops = getTreesDiffOperations(currentItems, new Map(items));
 
-    const result = apply(ops, false);
+    const result = applyOps(ops, false);
 
     notify(result.updates, batchedUpdatesWrapper);
   }
@@ -1049,25 +1137,35 @@ function makeStateMachine<
     );
   }
 
-  function apply(
-    ops: HistoryOp<TPresence>[],
+  function applyOps<O extends HistoryOp<TPresence>>(
+    rawOps: readonly O[],
     isLocal: boolean
   ): {
-    reverse: HistoryOp<TPresence>[];
+    // Input Ops can get opIds assigned during application.
+    ops: O[];
+    reverse: O[];
     updates: {
       storageUpdates: Map<string, StorageUpdate>;
       presence: boolean;
     };
   } {
-    const result = {
-      reverse: [] as HistoryOp<TPresence>[],
-      updates: {
-        storageUpdates: new Map<string, StorageUpdate>(),
-        presence: false,
-      },
+    const output = {
+      reverse: [] as O[],
+      storageUpdates: new Map<string, StorageUpdate>(),
+      presence: false,
     };
 
     const createdNodeIds = new Set<string>();
+
+    // Ops applied after undo/redo won't have opIds assigned, yet. Let's do
+    // that right now first.
+    const ops = rawOps.map((op) => {
+      if (op.type !== "presence" && !op.opId) {
+        return { ...op, opId: pool.generateOpId() };
+      } else {
+        return op;
+      }
+    });
 
     for (const op of ops) {
       if (op.type === "presence") {
@@ -1092,20 +1190,15 @@ function makeStateMachine<
           }
         }
 
-        result.reverse.unshift(reverse);
-        result.updates.presence = true;
+        output.reverse.unshift(reverse as O);
+        output.presence = true;
       } else {
         let source: OpSource;
-
-        // Ops applied after undo/redo don't have an opId.
-        if (!op.opId) {
-          op.opId = pool.generateOpId();
-        }
 
         if (isLocal) {
           source = OpSource.UNDOREDO_RECONNECT;
         } else {
-          const deleted = state.offlineOperations.delete(nn(op.opId));
+          const deleted = state.unacknowledgedOps.delete(nn(op.opId));
           source = deleted ? OpSource.ACK : OpSource.REMOTE;
         }
 
@@ -1122,16 +1215,16 @@ function makeStateMachine<
           // If the parent is the root (undefined) or was created in the same batch, we don't want to notify
           // storage updates for the children.
           if (!parentId || !createdNodeIds.has(parentId)) {
-            result.updates.storageUpdates.set(
+            output.storageUpdates.set(
               nn(applyOpResult.modified.node._id),
               mergeStorageUpdates(
-                result.updates.storageUpdates.get(
+                output.storageUpdates.get(
                   nn(applyOpResult.modified.node._id)
                 ) as any, // FIXME
                 applyOpResult.modified
               )
             );
-            result.reverse.unshift(...applyOpResult.reverse);
+            output.reverse.unshift(...(applyOpResult.reverse as O[]));
           }
 
           if (
@@ -1144,7 +1237,17 @@ function makeStateMachine<
         }
       }
     }
-    return result;
+
+    notifyStorageStatus();
+
+    return {
+      ops,
+      reverse: output.reverse,
+      updates: {
+        storageUpdates: output.storageUpdates,
+        presence: output.presence,
+      },
+    };
   }
 
   function applyOp(op: Op, source: OpSource): ApplyResult {
@@ -1273,6 +1376,11 @@ function makeStateMachine<
 
         case "history":
           return eventHub.history.subscribe(callback as Callback<HistoryEvent>);
+
+        case "storage-status":
+          return eventHub.storageStatus.subscribe(
+            callback as Callback<StorageStatus>
+          );
 
         // istanbul ignore next
         default:
@@ -1606,18 +1714,19 @@ function makeStateMachine<
           case ServerMsgCode.INITIAL_STORAGE_STATE: {
             // createOrUpdateRootFromMessage function could add ops to offlineOperations.
             // Client shouldn't resend these ops as part of the offline ops sending after reconnect.
-            const offlineOps = new Map(state.offlineOperations);
+            const unacknowledgedOps = new Map(state.unacknowledgedOps);
             createOrUpdateRootFromMessage(message, doNotBatchUpdates);
-            applyAndSendOfflineOps(offlineOps, doNotBatchUpdates);
+            applyAndSendOps(unacknowledgedOps, doNotBatchUpdates);
             if (_getInitialStateResolver !== null) {
               _getInitialStateResolver();
             }
+            notifyStorageStatus();
             eventHub.storageDidLoad.notify();
             break;
           }
           // Write event
           case ServerMsgCode.UPDATE_STORAGE: {
-            const applyResult = apply(message.ops, false);
+            const applyResult = applyOps(message.ops, false);
             applyResult.updates.storageUpdates.forEach((value, key) => {
               updates.storageUpdates.set(
                 key,
@@ -1788,9 +1897,8 @@ function makeStateMachine<
     connect();
   }
 
-  function applyAndSendOfflineOps(
-    offlineOps: Map<string | undefined, Op>,
-    //                       ^^^^^^^^^ NOTE: Bug? Unintended?
+  function applyAndSendOps(
+    offlineOps: Map<string, Op>,
     batchedUpdatesWrapper: (cb: () => void) => void
   ) {
     if (offlineOps.size === 0) {
@@ -1801,11 +1909,11 @@ function makeStateMachine<
 
     const ops = Array.from(offlineOps.values());
 
-    const result = apply(ops, true);
+    const result = applyOps(ops, true);
 
     messages.push({
       type: ClientMsgCode.UPDATE_STORAGE,
-      ops,
+      ops: result.ops,
     });
 
     notify(result.updates, batchedUpdatesWrapper);
@@ -1818,8 +1926,9 @@ function makeStateMachine<
 
     if (storageOps.length > 0) {
       storageOps.forEach((op) => {
-        state.offlineOperations.set(nn(op.opId), op);
+        state.unacknowledgedOps.set(nn(op.opId), op);
       });
+      notifyStorageStatus();
     }
 
     if (
@@ -1959,6 +2068,7 @@ function makeStateMachine<
       _getInitialStatePromise = new Promise(
         (resolve) => (_getInitialStateResolver = resolve)
       );
+      notifyStorageStatus();
     }
     return _getInitialStatePromise;
   }
@@ -2009,7 +2119,7 @@ function makeStateMachine<
     }
 
     state.pausedHistory = null;
-    const result = apply(historyOps, true);
+    const result = applyOps(historyOps, true);
 
     batchUpdates(() => {
       notify(result.updates, doNotBatchUpdates);
@@ -2017,7 +2127,7 @@ function makeStateMachine<
       onHistoryChange(doNotBatchUpdates);
     });
 
-    for (const op of historyOps) {
+    for (const op of result.ops) {
       if (op.type !== "presence") {
         state.buffer.storageOperations.push(op);
       }
@@ -2040,7 +2150,7 @@ function makeStateMachine<
     }
 
     state.pausedHistory = null;
-    const result = apply(historyOps, true);
+    const result = applyOps(historyOps, true);
 
     batchUpdates(() => {
       notify(result.updates, doNotBatchUpdates);
@@ -2048,7 +2158,7 @@ function makeStateMachine<
       onHistoryChange(doNotBatchUpdates);
     });
 
-    for (const op of historyOps) {
+    for (const op of result.ops) {
       if (op.type !== "presence") {
         state.buffer.storageOperations.push(op);
       }
@@ -2136,6 +2246,36 @@ function makeStateMachine<
     onClose(event);
   }
 
+  function getStorageStatus(): StorageStatus {
+    if (_getInitialStatePromise === null) {
+      return "not-loaded";
+    }
+
+    if (state.root === undefined) {
+      return "loading";
+    }
+
+    return state.unacknowledgedOps.size === 0
+      ? "synchronized"
+      : "synchronizing";
+  }
+
+  /**
+   * Storage status is a computed value based other internal states so we need to keep a reference to the previous computed value to avoid triggering events when it does not change
+   * This is far from ideal because we need to call this function whenever we update our internal states.
+   *
+   * TODO: Encapsulate our internal state differently to make sure this event is triggered whenever necessary.
+   * Currently okay because we only have 4 callers and shielded by tests.
+   */
+  let _lastStorageStatus = getStorageStatus();
+  function notifyStorageStatus() {
+    const storageStatus = getStorageStatus();
+    if (_lastStorageStatus !== storageStatus) {
+      _lastStorageStatus = storageStatus;
+      eventHub.storageStatus.notify(storageStatus);
+    }
+  }
+
   return {
     // Internal
     onClose,
@@ -2153,6 +2293,7 @@ function makeStateMachine<
     // Core
     connect,
     disconnect,
+    reconnect,
     subscribe,
 
     // Presence
@@ -2170,6 +2311,7 @@ function makeStateMachine<
 
     getStorage,
     getStorageSnapshot,
+    getStorageStatus,
 
     events: {
       customEvent: eventHub.customEvent.observable,
@@ -2180,6 +2322,7 @@ function makeStateMachine<
       storage: eventHub.storage.observable,
       history: eventHub.history.observable,
       storageDidLoad: eventHub.storageDidLoad.observable,
+      storageStatus: eventHub.storageStatus.observable,
     },
 
     // Core
@@ -2190,6 +2333,11 @@ function makeStateMachine<
     // Presence
     getPresence,
     getOthers,
+
+    // Support for the Liveblocks browser extension
+    getSelf_forDevTools: () => selfAsTreeNode.current,
+    getOthers_forDevTools: (): readonly DevTools.UserTreeNode[] =>
+      state.others_forDevTools.current,
   };
 }
 
@@ -2203,6 +2351,9 @@ function defaultState<
   initialStorage?: TStorage
 ): State<TPresence, TStorage, TUserMeta, TRoomEvent> {
   const others = new OthersRef<TPresence, TUserMeta>();
+  const others_forDevTools = new DerivedRef(others, (others) =>
+    others.map((other, index) => userToTreeNode(`Other ${index}`, other))
+  );
 
   const connection = new ValueRef<Connection>({ state: "closed" });
 
@@ -2234,6 +2385,7 @@ function defaultState<
     connection,
     me: new MeRef(initialPresence),
     others,
+    others_forDevTools,
 
     initialStorage,
     idFactory: null,
@@ -2249,7 +2401,7 @@ function defaultState<
     pausedHistory: null,
 
     activeBatch: null,
-    offlineOperations: new Map<string, Op>(),
+    unacknowledgedOps: new Map<string, Op>(),
   };
 }
 
@@ -2300,6 +2452,7 @@ export function createRoom<
     getConnectionState: machine.getConnectionState,
     isSelfAware: machine.isSelfAware,
     getSelf: machine.getSelf,
+    reconnect: machine.reconnect,
 
     subscribe: machine.subscribe,
 
@@ -2316,6 +2469,7 @@ export function createRoom<
     //////////////
     getStorage: machine.getStorage,
     getStorageSnapshot: machine.getStorageSnapshot,
+    getStorageStatus: machine.getStorageStatus,
     events: machine.events,
 
     batch: machine.batch,
@@ -2332,6 +2486,9 @@ export function createRoom<
       simulateCloseWebsocket: machine.simulateSocketClose,
       simulateSendCloseEvent: machine.simulateSendCloseEvent,
     },
+
+    getSelf_forDevTools: machine.getSelf_forDevTools,
+    getOthers_forDevTools: machine.getOthers_forDevTools,
   };
 
   return {

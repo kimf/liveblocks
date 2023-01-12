@@ -1,10 +1,12 @@
 import { nn } from "../lib/assert";
+import { nanoid } from "../lib/nanoid";
 import type { Pos } from "../lib/position";
 import { asPos, comparePosition, makePosition } from "../lib/position";
 import type { CreateChildOp, CreateListOp, CreateOp, Op } from "../protocol/Op";
 import { OpCode } from "../protocol/Op";
 import type { IdTuple, SerializedList } from "../protocol/SerializedCrdt";
 import { CrdtType } from "../protocol/SerializedCrdt";
+import type * as DevTools from "../types/DevToolsTreeNode";
 import type { ParentToChildNodeMap } from "../types/NodeMap";
 import type { ApplyResult, ManagedPool } from "./AbstractCrdt";
 import { AbstractCrdt, OpSource } from "./AbstractCrdt";
@@ -543,8 +545,10 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
 
       this._items[indexOfItemWithSameKey] = child;
 
-      const reverse = existingItem._toOps(nn(this._id), key, this._pool);
-      addIntentAndDeletedIdToOperation(reverse, op.id);
+      const reverse = HACK_addIntentAndDeletedIdToOperation(
+        existingItem._toOps(nn(this._id), key, this._pool),
+        op.id
+      );
 
       const delta = [setDelta(indexOfItemWithSameKey, child)];
       const deletedDelta = this._detachItemAssociatedToSetOperation(
@@ -1081,11 +1085,15 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
       const storageUpdates = new Map<string, LiveListUpdates<TItem>>();
       storageUpdates.set(this._id, makeUpdate(this, [setDelta(index, value)]));
 
-      const ops = value._toOps(this._id, position, this._pool);
-      addIntentAndDeletedIdToOperation(ops, existingId);
+      const ops = HACK_addIntentAndDeletedIdToOperation(
+        value._toOps(this._id, position, this._pool),
+        existingId
+      );
       this._unacknowledgedSets.set(position, nn(ops[0].opId));
-      const reverseOps = existingItem._toOps(this._id, position, undefined);
-      addIntentAndDeletedIdToOperation(reverseOps, id);
+      const reverseOps = HACK_addIntentAndDeletedIdToOperation(
+        existingItem._toOps(this._id, position, undefined),
+        id
+      );
 
       this._pool.dispatch(ops, reverseOps, storageUpdates);
     }
@@ -1242,6 +1250,18 @@ export class LiveList<TItem extends Lson> extends AbstractCrdt {
     this._items[index]._setParentLink(this, shiftedPosition);
   }
 
+  /** @internal */
+  _toTreeNode(key: string): DevTools.LsonTreeNode {
+    return {
+      type: "LiveList",
+      id: this._id ?? nanoid(),
+      key,
+      payload: this._items.map((item, index) =>
+        item.toTreeNode(index.toString())
+      ),
+    };
+  }
+
   toImmutable(): readonly ToImmutable<TItem>[] {
     // Don't implement actual toJson logic in here. Implement it in ._toImmutable()
     // instead. This helper merely exists to help TypeScript infer better
@@ -1338,17 +1358,21 @@ function moveDelta(
  * As soon as we refactor the operations structure,
  * serializing a LiveStructure should not know anything about intent
  */
-function addIntentAndDeletedIdToOperation(
+function HACK_addIntentAndDeletedIdToOperation(
   ops: CreateChildOp[],
   deletedId: string | undefined
-) {
-  if (ops.length === 0) {
-    throw new Error(
-      "Internal error. Serialized LiveStructure should have at least 1 operation"
-    );
-  }
-
-  const firstOp = ops[0];
-  firstOp.intent = "set";
-  firstOp.deletedId = deletedId;
+): CreateChildOp[] {
+  return ops.map((op, index) => {
+    if (index === 0) {
+      // NOTE: Only patch the first Op here
+      const firstOp = op;
+      return {
+        ...firstOp,
+        intent: "set",
+        deletedId,
+      };
+    } else {
+      return op;
+    }
+  });
 }

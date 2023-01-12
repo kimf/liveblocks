@@ -49,6 +49,7 @@ const defaultContext = {
 const defaultRoomToken: RoomAuthToken = {
   appId: "my-app",
   roomId: "my-room",
+  id: "user1",
   actor: 0,
   scopes: [],
 };
@@ -1276,6 +1277,53 @@ describe("room", () => {
         },
       ]);
     });
+
+    test("hasPendingStorageModifications", async () => {
+      const { storage, assert, machine, refStorage, reconnect, ws } =
+        await prepareStorageTest<{ x: number }>(
+          [createSerializedObject("0:0", { x: 0 })],
+          1
+        );
+
+      assert({ x: 0 });
+
+      expect(machine.getStorageStatus()).toBe("synchronized");
+
+      const storageStatusCallback = jest.fn();
+
+      machine.events.storageStatus.subscribe(storageStatusCallback);
+
+      ws.closeFromBackend(
+        new CloseEvent("close", {
+          code: WebsocketCloseCodes.CLOSE_ABNORMAL,
+          wasClean: false,
+        })
+      );
+
+      storage.root.set("x", 1);
+
+      expect(storageStatusCallback).toBeCalledWith("synchronizing");
+      expect(machine.getStorageStatus()).toBe("synchronizing");
+
+      const storageJson = lsonToJson(storage.root);
+      expect(storageJson).toEqual({ x: 1 });
+      const refStorageJson = lsonToJson(refStorage.root);
+      expect(refStorageJson).toEqual({ x: 0 });
+
+      const newInitStorage: IdTuple<SerializedCrdt>[] = [
+        createSerializedObject("0:0", { x: 0 }),
+      ];
+
+      reconnect(2, newInitStorage);
+
+      assert({
+        x: 1,
+      });
+      expect(machine.getStorageStatus()).toBe("synchronized");
+      expect(storageStatusCallback).toBeCalledWith("synchronized");
+
+      expect(storageStatusCallback).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("reconnect", () => {
@@ -1336,6 +1384,28 @@ describe("room", () => {
       );
 
       expect(state.numberOfRetry).toEqual(1);
+    });
+
+    test("manual reconnection", () => {
+      const { machine } = setupStateMachine({ x: 0 });
+      expect(machine.getConnectionState()).toBe("closed");
+
+      const ws = new MockWebSocket("");
+      machine.connect();
+      expect(machine.getConnectionState()).toBe("authenticating");
+
+      machine.authenticationSuccess(defaultRoomToken, ws);
+      expect(machine.getConnectionState()).toBe("connecting");
+
+      ws.open();
+      expect(machine.getConnectionState()).toBe("open");
+
+      machine.reconnect();
+      expect(machine.getConnectionState()).toBe("authenticating");
+
+      machine.authenticationSuccess(defaultRoomToken, ws);
+      ws.open();
+      expect(machine.getConnectionState()).toBe("open");
     });
   });
 
